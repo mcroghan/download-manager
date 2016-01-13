@@ -6,7 +6,7 @@ import android.content.ContentValues;
 import android.database.Cursor;
 import android.net.Uri;
 
-public class BatchStartingService {
+class BatchStartingService {
     private final ContentResolver resolver;
     private Uri batchesUri;
 

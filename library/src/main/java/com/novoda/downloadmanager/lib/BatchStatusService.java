@@ -12,7 +12,7 @@ import com.novoda.notils.string.StringUtils;
 import java.util.Arrays;
 import java.util.List;
 
-public class BatchStatusService {
+class BatchStatusService {
 
     private static final List<Integer> PRIORITISED_STATUSES = Arrays.asList(
             DownloadStatus.CANCELED,
