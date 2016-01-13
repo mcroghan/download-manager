@@ -4,13 +4,11 @@ import android.content.ContentResolver;
 import android.database.Cursor;
 import android.support.annotation.NonNull;
 
-import com.novoda.downloadmanager.notifications.NotificationVisibility;
 import com.novoda.notils.string.QueryUtils;
 import com.novoda.notils.string.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 
 class BatchRepository {
@@ -24,13 +22,15 @@ class BatchRepository {
     private final DownloadsUriProvider downloadsUriProvider;
     private final BatchStatusService batchStatusService;
     private final BatchStartingService batchStartingService;
+    private final BatchRetrievalService batchRetrievalService;
 
     BatchRepository(ContentResolver resolver, DownloadDeleter downloadDeleter, DownloadsUriProvider downloadsUriProvider, SystemFacade systemFacade) {
         this.resolver = resolver;
         this.downloadDeleter = downloadDeleter;
         this.downloadsUriProvider = downloadsUriProvider;
         this.batchStatusService = new BatchStatusService(resolver, downloadsUriProvider, systemFacade);
-        batchStartingService = new BatchStartingService(resolver, downloadsUriProvider);
+        this.batchStartingService = new BatchStartingService(resolver, downloadsUriProvider);
+        this.batchRetrievalService = new BatchRetrievalService(resolver, downloadsUriProvider);
     }
 
     void updateBatchStatus(long batchId, int status) {
@@ -72,56 +72,20 @@ class BatchRepository {
         batchStartingService.markMatchAsStarted(batchId);
     }
 
-    public DownloadBatch retrieveBatchFor(FileDownloadInfo download) {
-        Collection<FileDownloadInfo> downloads = Collections.singletonList(download);
-        List<DownloadBatch> batches = retrieveBatchesFor(downloads);
-
-        for (DownloadBatch batch : batches) {
-            if (batch.getBatchId() == download.getBatchId()) {
-                return batch;
-            }
-        }
-
-        return DownloadBatch.DELETED;
-    }
-
     public List<DownloadBatch> retrieveBatchesFor(Collection<FileDownloadInfo> downloads) {
-        Cursor cursor = queryBatches(null, null, null);
-        try {
-            return downloadBatchesFrom(downloads, cursor);
-        } finally {
-            safeCloseCursor(cursor);
-        }
+        return batchRetrievalService.retrieveBatchesFor(downloads);
     }
 
-    private List<DownloadBatch> downloadBatchesFrom(Collection<FileDownloadInfo> downloads, Cursor batchesCursor) {
-        List<DownloadBatch> batches = new ArrayList<>(batchesCursor.getCount());
-        while (batchesCursor.moveToNext()) {
-            batches.add(downloadBatchFrom(downloads, batchesCursor));
-        }
-        return batches;
+    public DownloadBatch retrieveBatchFor(FileDownloadInfo download) {
+        return batchRetrievalService.retrieveBatchFor(download);
     }
 
-    private DownloadBatch downloadBatchFrom(Collection<FileDownloadInfo> downloads, Cursor cursor) {
-        long id = Cursors.getLong(cursor, DownloadContract.Batches._ID);
-        String title = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_TITLE);
-        String description = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_DESCRIPTION);
-        String bigPictureUrl = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_BIG_PICTURE);
-        int status = Cursors.getInt(cursor, DownloadContract.Batches.COLUMN_STATUS);
-        @NotificationVisibility.Value int visibility = Cursors.getInt(cursor, DownloadContract.Batches.COLUMN_VISIBILITY);
-        String extraData = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_EXTRA_DATA);
-        long totalSizeBytes = Cursors.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_TOTAL_BYTES);
-        long currentSizeBytes = Cursors.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_CURRENT_BYTES);
-        BatchInfo batchInfo = new BatchInfo(title, description, bigPictureUrl, visibility, extraData);
+    public Cursor retrieveFor(BatchQuery query) {
+        return batchRetrievalService.retrieveFor(query);
+    }
 
-        List<FileDownloadInfo> batchDownloads = new ArrayList<>(1);
-        for (FileDownloadInfo fileDownloadInfo : downloads) {
-            if (fileDownloadInfo.getBatchId() == id) {
-                batchDownloads.add(fileDownloadInfo);
-            }
-        }
-
-        return new DownloadBatch(id, batchInfo, batchDownloads, status, totalSizeBytes, currentSizeBytes);
+    private Cursor queryBatches(String[] projection, String selection, String[] selectionArgs) {
+        return batchRetrievalService.queryBatches(projection, selection, selectionArgs);
     }
 
     public void deleteMarkedBatchesFor(Collection<FileDownloadInfo> downloads) {
@@ -154,26 +118,6 @@ class BatchRepository {
         }
         batchesCursor.close();
         return batchIdsToDelete;
-    }
-
-    public Cursor retrieveFor(BatchQuery query) {
-        return resolver.query(downloadsUriProvider.getBatchesUri(), null, query.getSelection(), query.getSelectionArguments(), query.getSortOrder());
-    }
-
-    private void safeCloseCursor(Cursor cursor) {
-        if (cursor != null) {
-            cursor.close();
-        }
-    }
-
-    private Cursor queryBatches(String[] projection, String selection, String[] selectionArgs) {
-        return resolver.query(
-                downloadsUriProvider.getBatchesUri(),
-                projection,
-                selection,
-                selectionArgs,
-                null
-        );
     }
 
 }
