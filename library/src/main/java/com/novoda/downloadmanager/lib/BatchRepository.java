@@ -5,54 +5,17 @@ import android.content.ContentUris;
 import android.content.ContentValues;
 import android.database.Cursor;
 import android.support.annotation.NonNull;
-import android.support.v4.util.SparseArrayCompat;
 
 import com.novoda.downloadmanager.notifications.NotificationVisibility;
 import com.novoda.notils.string.QueryUtils;
 import com.novoda.notils.string.StringUtils;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
 class BatchRepository {
-
-    private static final List<Integer> PRIORITISED_STATUSES = Arrays.asList(
-            DownloadStatus.CANCELED,
-            DownloadStatus.PAUSING,
-            DownloadStatus.PAUSED_BY_APP,
-            DownloadStatus.RUNNING,
-            DownloadStatus.DELETING,
-
-            // Paused statuses
-            DownloadStatus.QUEUED_DUE_CLIENT_RESTRICTIONS,
-            DownloadStatus.WAITING_TO_RETRY,
-            DownloadStatus.WAITING_FOR_NETWORK,
-            DownloadStatus.QUEUED_FOR_WIFI,
-
-            DownloadStatus.SUBMITTED,
-            DownloadStatus.PENDING,
-            DownloadStatus.SUCCESS
-    );
-
-    private static final List<Integer> STATUSES_EXCEPT_SUCCESS_SUBMITTED = Arrays.asList(
-            DownloadStatus.CANCELED,
-            DownloadStatus.PAUSED_BY_APP,
-            DownloadStatus.RUNNING,
-            DownloadStatus.DELETING,
-
-            // Paused statuses
-            DownloadStatus.QUEUED_DUE_CLIENT_RESTRICTIONS,
-            DownloadStatus.WAITING_TO_RETRY,
-            DownloadStatus.WAITING_FOR_NETWORK,
-            DownloadStatus.QUEUED_FOR_WIFI,
-
-            DownloadStatus.PENDING
-    );
-
-    private static final int PRIORITISED_STATUSES_SIZE = PRIORITISED_STATUSES.size();
 
     private static final String[] PROJECT_BATCH_ID = {DownloadContract.Batches._ID};
     private static final String WHERE_DELETED_VALUE_IS = DownloadContract.Batches.COLUMN_DELETED + " = ?";
@@ -61,79 +24,44 @@ class BatchRepository {
     private final ContentResolver resolver;
     private final DownloadDeleter downloadDeleter;
     private final DownloadsUriProvider downloadsUriProvider;
-    private final SystemFacade systemFacade;
-    private final StatusesCount statusesCount = new StatusesCount();
+    private final BatchStatusService batchStatusService;
 
     BatchRepository(ContentResolver resolver, DownloadDeleter downloadDeleter, DownloadsUriProvider downloadsUriProvider, SystemFacade systemFacade) {
         this.resolver = resolver;
         this.downloadDeleter = downloadDeleter;
         this.downloadsUriProvider = downloadsUriProvider;
-        this.systemFacade = systemFacade;
+        this.batchStatusService = new BatchStatusService(resolver, downloadsUriProvider, systemFacade);
     }
 
     void updateBatchStatus(long batchId, int status) {
-        ContentValues values = new ContentValues();
-        values.put(DownloadContract.Batches.COLUMN_STATUS, status);
-        values.put(DownloadContract.Batches.COLUMN_LAST_MODIFICATION, systemFacade.currentTimeMillis());
-        resolver.update(downloadsUriProvider.getBatchesUri(), values, DownloadContract.Batches._ID + " = ?", new String[]{String.valueOf(batchId)});
+        batchStatusService.updateBatchStatus(batchId, status);
     }
 
     int getBatchStatus(long batchId) {
-        String[] projection = {DownloadContract.Batches.COLUMN_STATUS};
-        String selection = DownloadContract.Batches._ID + " = ?";
-        String[] selectionArgs = {String.valueOf(batchId)};
-
-        Cursor cursor = queryBatches(projection, selection, selectionArgs);
-
-        try {
-            cursor.moveToFirst();
-            return Db.getInt(cursor, DownloadContract.Batches.COLUMN_STATUS);
-        } finally {
-            safeCloseCursor(cursor);
-        }
+        return batchStatusService.getBatchStatus(batchId);
     }
 
     int calculateBatchStatus(long batchId) {
-        Cursor cursor = null;
-        statusesCount.clear();
-        try {
-            String[] projection = {DownloadContract.Downloads.COLUMN_STATUS};
-            String[] selectionArgs = {String.valueOf(batchId)};
-            String selection = DownloadContract.Downloads.COLUMN_BATCH_ID + " = ?";
-            cursor = queryDownloads(projection, selectionArgs, selection);
-
-            while (cursor.moveToNext()) {
-                int statusCode = Db.getInt(cursor, DownloadContract.Downloads.COLUMN_STATUS);
-
-                if (DownloadStatus.isError(statusCode)) {
-                    return statusCode;
-                }
-
-                statusesCount.incrementCountFor(statusCode);
-            }
-        } finally {
-            safeCloseCursor(cursor);
-        }
-
-        if (onlyCompleteAndSubmittedIn(statusesCount)) {
-            return DownloadStatus.RUNNING;
-        }
-
-        for (int status : PRIORITISED_STATUSES) {
-            if (statusesCount.hasCountFor(status)) {
-                return status;
-            }
-        }
-
-        return DownloadStatus.UNKNOWN_ERROR;
+        return batchStatusService.calculateBatchStatusFromDownloads(batchId);
     }
 
-    private boolean onlyCompleteAndSubmittedIn(StatusesCount statusesCount) {
-        boolean hasCompleteItems = statusesCount.hasCountFor(DownloadStatus.SUCCESS);
-        boolean hasSubmittedItems = statusesCount.hasCountFor(DownloadStatus.SUBMITTED);
-        boolean hasNotOtherItems = statusesCount.hasNoItemsWithStatuses(STATUSES_EXCEPT_SUCCESS_SUBMITTED);
+    public void setBatchItemsCancelled(long batchId) {
+        batchStatusService.setBatchItemsCancelled(batchId);
+    }
 
-        return hasCompleteItems && hasSubmittedItems && hasNotOtherItems;
+    public void cancelBatch(long batchId) {
+        batchStatusService.cancelBatch(batchId);
+    }
+
+    public void setBatchItemsFailed(long batchId, long excludedDownloadId) {
+        batchStatusService.setBatchItemsFailed(batchId, excludedDownloadId);
+    }
+
+    /**
+     * @return Number of rows updated
+     */
+    int updateBatchesToPendingStatus(@NonNull List<String> batchIds) {
+        return batchStatusService.updateBatchToPendingStatus(batchIds);
     }
 
     boolean isBatchStartingForTheFirstTime(long batchId) {
@@ -147,7 +75,7 @@ class BatchRepository {
 
         try {
             if (cursor.moveToFirst()) {
-                hasStarted = Db.getInt(cursor, DownloadContract.Batches.COLUMN_HAS_STARTED);
+                hasStarted = Cursors.getInt(cursor, DownloadContract.Batches.COLUMN_HAS_STARTED);
             }
         } finally {
             safeCloseCursor(cursor);
@@ -187,15 +115,15 @@ class BatchRepository {
     }
 
     private DownloadBatch downloadBatchFrom(Collection<FileDownloadInfo> downloads, Cursor cursor) {
-        long id = Db.getLong(cursor, DownloadContract.Batches._ID);
-        String title = Db.getString(cursor, DownloadContract.Batches.COLUMN_TITLE);
-        String description = Db.getString(cursor, DownloadContract.Batches.COLUMN_DESCRIPTION);
-        String bigPictureUrl = Db.getString(cursor, DownloadContract.Batches.COLUMN_BIG_PICTURE);
-        int status = Db.getInt(cursor, DownloadContract.Batches.COLUMN_STATUS);
-        @NotificationVisibility.Value int visibility = Db.getInt(cursor, DownloadContract.Batches.COLUMN_VISIBILITY);
-        String extraData = Db.getString(cursor, DownloadContract.Batches.COLUMN_EXTRA_DATA);
-        long totalSizeBytes = Db.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_TOTAL_BYTES);
-        long currentSizeBytes = Db.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_CURRENT_BYTES);
+        long id = Cursors.getLong(cursor, DownloadContract.Batches._ID);
+        String title = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_TITLE);
+        String description = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_DESCRIPTION);
+        String bigPictureUrl = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_BIG_PICTURE);
+        int status = Cursors.getInt(cursor, DownloadContract.Batches.COLUMN_STATUS);
+        @NotificationVisibility.Value int visibility = Cursors.getInt(cursor, DownloadContract.Batches.COLUMN_VISIBILITY);
+        String extraData = Cursors.getString(cursor, DownloadContract.Batches.COLUMN_EXTRA_DATA);
+        long totalSizeBytes = Cursors.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_TOTAL_BYTES);
+        long currentSizeBytes = Cursors.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_CURRENT_BYTES);
         BatchInfo batchInfo = new BatchInfo(title, description, bigPictureUrl, visibility, extraData);
 
         List<FileDownloadInfo> batchDownloads = new ArrayList<>(1);
@@ -210,17 +138,6 @@ class BatchRepository {
 
     public void deleteMarkedBatchesFor(Collection<FileDownloadInfo> downloads) {
         deleteBatchesForIds(batchIdsToDelete(), downloads);
-    }
-
-    private List<Long> batchIdsToDelete() {
-        Cursor batchesCursor = queryBatches(PROJECT_BATCH_ID, WHERE_DELETED_VALUE_IS, MARKED_FOR_DELETION);
-        List<Long> batchIdsToDelete = new ArrayList<>();
-        while (batchesCursor.moveToNext()) {
-            long id = batchesCursor.getLong(0);
-            batchIdsToDelete.add(id);
-        }
-        batchesCursor.close();
-        return batchIdsToDelete;
     }
 
     private void deleteBatchesForIds(List<Long> batchIdsToDelete, Collection<FileDownloadInfo> downloads) {
@@ -240,44 +157,19 @@ class BatchRepository {
         resolver.delete(downloadsUriProvider.getBatchesUri(), where, selectionArgs);
     }
 
+    private List<Long> batchIdsToDelete() {
+        Cursor batchesCursor = queryBatches(PROJECT_BATCH_ID, WHERE_DELETED_VALUE_IS, MARKED_FOR_DELETION);
+        List<Long> batchIdsToDelete = new ArrayList<>();
+        while (batchesCursor.moveToNext()) {
+            long id = batchesCursor.getLong(0);
+            batchIdsToDelete.add(id);
+        }
+        batchesCursor.close();
+        return batchIdsToDelete;
+    }
+
     public Cursor retrieveFor(BatchQuery query) {
         return resolver.query(downloadsUriProvider.getBatchesUri(), null, query.getSelection(), query.getSelectionArguments(), query.getSortOrder());
-    }
-
-    public void setBatchItemsCancelled(long batchId) {
-        ContentValues values = new ContentValues(1);
-        values.put(DownloadContract.Downloads.COLUMN_STATUS, DownloadStatus.CANCELED);
-        resolver.update(downloadsUriProvider.getAllDownloadsUri(), values, DownloadContract.Downloads.COLUMN_BATCH_ID + " = ?", new String[]{String.valueOf(batchId)});
-    }
-
-    public void cancelBatch(long batchId) {
-        ContentValues downloadValues = new ContentValues(1);
-        downloadValues.put(DownloadContract.Downloads.COLUMN_STATUS, DownloadStatus.CANCELED);
-        resolver.update(
-                downloadsUriProvider.getAllDownloadsUri(),
-                downloadValues,
-                DownloadContract.Downloads.COLUMN_BATCH_ID + " = ?",
-                new String[]{String.valueOf(batchId)}
-        );
-        ContentValues batchValues = new ContentValues(1);
-        batchValues.put(DownloadContract.Batches.COLUMN_STATUS, DownloadStatus.CANCELED);
-        resolver.update(
-                ContentUris.withAppendedId(downloadsUriProvider.getBatchesUri(), batchId),
-                batchValues,
-                null,
-                null
-        );
-    }
-
-    public void setBatchItemsFailed(long batchId, long downloadId) {
-        ContentValues values = new ContentValues(1);
-        values.put(DownloadContract.Downloads.COLUMN_STATUS, DownloadStatus.BATCH_FAILED);
-        resolver.update(
-                downloadsUriProvider.getAllDownloadsUri(),
-                values,
-                DownloadContract.Downloads.COLUMN_BATCH_ID + " = ? AND " + DownloadContract.Downloads._ID + " <> ? ",
-                new String[]{String.valueOf(batchId), String.valueOf(downloadId)}
-        );
     }
 
     public void markBatchAsStarted(long batchId) {
@@ -289,27 +181,6 @@ class BatchRepository {
                 null,
                 null
         );
-    }
-
-    /**
-     * @return Number of rows updated
-     */
-    int updateBatchToPendingStatus(@NonNull List<String> batchIdsToBeUnlocked) {
-        ContentValues values = new ContentValues(1);
-        values.put(DownloadContract.Batches.COLUMN_STATUS, DownloadStatus.PENDING);
-
-        int batchIdsSize = batchIdsToBeUnlocked.size();
-        String[] whereArray = new String[batchIdsSize];
-        String[] selectionArgs = new String[batchIdsSize];
-
-        for (int i = 0; i < batchIdsSize; i++) {
-            whereArray[i] = DownloadContract.Batches._ID + " = ?";
-            selectionArgs[i] = batchIdsToBeUnlocked.get(i);
-        }
-
-        String where = StringUtils.join(Arrays.asList(whereArray), " or ");
-
-        return resolver.update(downloadsUriProvider.getBatchesUri(), values, where, selectionArgs);
     }
 
     private void safeCloseCursor(Cursor cursor) {
@@ -326,78 +197,6 @@ class BatchRepository {
                 selectionArgs,
                 null
         );
-    }
-
-    private Cursor queryDownloads(String[] projection, String[] selectionArgs, String selection) {
-        return resolver.query(
-                downloadsUriProvider.getAllDownloadsUri(),
-                projection,
-                selection,
-                selectionArgs,
-                null
-        );
-    }
-
-    private static class Db {
-        private Db() {
-
-        }
-
-        public static int getInt(Cursor c, String column) {
-            return c.getInt(columnIndexFor(c, column));
-        }
-
-        public static long getLong(Cursor c, String column) {
-            return c.getLong(columnIndexFor(c, column));
-        }
-
-        public static String getString(Cursor c, String column) {
-            return c.getString(columnIndexFor(c, column));
-        }
-
-        private static int columnIndexFor(Cursor c, String column) {
-            return c.getColumnIndexOrThrow(column);
-        }
-    }
-
-    private static class StatusesCount {
-
-        private final SparseArrayCompat<Integer> statusCounts = new SparseArrayCompat<>(PRIORITISED_STATUSES_SIZE);
-
-        public boolean hasNoItemsWithStatuses(List<Integer> excludedStatuses) {
-            for (int status : excludedStatuses) {
-                if (hasCountFor(status)) {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        public boolean hasCountFor(int statusCode) {
-            return statusCounts.get(statusCode, 0) > 0;
-        }
-
-        public void incrementCountFor(int statusCode) {
-            int currentStatusCount = statusCounts.get(statusCode, 0);
-            statusCounts.put(statusCode, currentStatusCount + 1);
-        }
-
-        public void clear() {
-            statusCounts.clear();
-        }
-
-        @Override
-        public String toString() {
-            StringBuilder stringBuilder = new StringBuilder("{");
-
-            int size = statusCounts.size();
-            for (int i = 0; i < size; i++) {
-                stringBuilder.append("[status: ").append(statusCounts.keyAt(i)).append(", count: ").append(statusCounts.valueAt(i)).append("]");
-            }
-
-            return stringBuilder.append("}").toString();
-        }
     }
 
 }

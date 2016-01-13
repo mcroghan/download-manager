@@ -183,7 +183,7 @@ public class DownloadService extends Service {
         }
 
         downloadsRepository.updateRunningOrSubmittedDownloadsToPending();
-        batchRepository.updateBatchToPendingStatus(batchesToBeUnlocked);
+        batchRepository.updateBatchesToPendingStatus(batchesToBeUnlocked);
     }
 
     /**
