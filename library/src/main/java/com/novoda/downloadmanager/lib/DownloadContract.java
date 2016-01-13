@@ -347,9 +347,15 @@ final class DownloadContract {
 
         /**
          * One of the values taken by {@link DownloadContract.Batches#COLUMN_HAS_STARTED}.
-         * This value is used when the batch is starting for the first tme.
+         * This value is used when the batch has already started.
          */
         public static final int BATCH_HAS_STARTED = 1;
+
+        /**
+         * One of the values taken by {@link DownloadContract.Batches#COLUMN_HAS_STARTED}.
+         * This value is used when the batch is starting for the first tme.
+         */
+        public static final int BATCH_HAS_NOT_STARTED = 0;
 
         private Batches() {
             // non-instantiable class

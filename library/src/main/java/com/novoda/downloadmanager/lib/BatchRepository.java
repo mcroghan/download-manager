@@ -17,9 +17,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
-import static com.novoda.downloadmanager.lib.DownloadContract.Downloads.COLUMN_BATCH_ID;
-import static com.novoda.downloadmanager.lib.DownloadContract.Downloads.COLUMN_STATUS;
-
 class BatchRepository {
 
     private static final List<Integer> PRIORITISED_STATUSES = Arrays.asList(
@@ -65,7 +62,7 @@ class BatchRepository {
     private final DownloadDeleter downloadDeleter;
     private final DownloadsUriProvider downloadsUriProvider;
     private final SystemFacade systemFacade;
-    private final StatusCountMap statusCountMap = new StatusCountMap();
+    private final StatusesCount statusesCount = new StatusesCount();
 
     BatchRepository(ContentResolver resolver, DownloadDeleter downloadDeleter, DownloadsUriProvider downloadsUriProvider, SystemFacade systemFacade) {
         this.resolver = resolver;
@@ -83,67 +80,47 @@ class BatchRepository {
 
     int getBatchStatus(long batchId) {
         String[] projection = {DownloadContract.Batches.COLUMN_STATUS};
-        String where = DownloadContract.Batches._ID + " = ?";
+        String selection = DownloadContract.Batches._ID + " = ?";
         String[] selectionArgs = {String.valueOf(batchId)};
 
-        Cursor cursor = resolver.query(
-                downloadsUriProvider.getBatchesUri(),
-                projection,
-                where,
-                selectionArgs,
-                null
-        );
+        Cursor cursor = queryBatches(projection, selection, selectionArgs);
 
         try {
             cursor.moveToFirst();
-            return cursor.getInt(0);
+            return Db.getInt(cursor, DownloadContract.Batches.COLUMN_STATUS);
         } finally {
-            if (cursor != null) {
-                cursor.close();
-            }
+            safeCloseCursor(cursor);
         }
     }
 
     int calculateBatchStatus(long batchId) {
         Cursor cursor = null;
-        statusCountMap.clear();
+        statusesCount.clear();
         try {
             String[] projection = {DownloadContract.Downloads.COLUMN_STATUS};
             String[] selectionArgs = {String.valueOf(batchId)};
-
-            cursor = resolver.query(
-                    downloadsUriProvider.getAllDownloadsUri(),
-                    projection,
-                    DownloadContract.Downloads.COLUMN_BATCH_ID + " = ?",
-                    selectionArgs,
-                    null
-            );
+            String selection = DownloadContract.Downloads.COLUMN_BATCH_ID + " = ?";
+            cursor = queryDownloads(projection, selectionArgs, selection);
 
             while (cursor.moveToNext()) {
-                int statusCode = cursor.getInt(0);
+                int statusCode = Db.getInt(cursor, DownloadContract.Downloads.COLUMN_STATUS);
 
                 if (DownloadStatus.isError(statusCode)) {
                     return statusCode;
                 }
 
-                statusCountMap.increment(statusCode);
+                statusesCount.incrementCountFor(statusCode);
             }
         } finally {
-            if (cursor != null) {
-                cursor.close();
-            }
+            safeCloseCursor(cursor);
         }
 
-        boolean hasCompleteItems = statusCountMap.hasCountFor(DownloadStatus.SUCCESS);
-        boolean hasSubmittedItems = statusCountMap.hasCountFor(DownloadStatus.SUBMITTED);
-        boolean hasOtherItems = statusCountMap.hasNoItemsWithStatuses(STATUSES_EXCEPT_SUCCESS_SUBMITTED);
-
-        if (hasCompleteItems && hasSubmittedItems && !hasOtherItems) {
+        if (onlyCompleteAndSubmittedIn(statusesCount)) {
             return DownloadStatus.RUNNING;
         }
 
         for (int status : PRIORITISED_STATUSES) {
-            if (statusCountMap.hasCountFor(status)) {
+            if (statusesCount.hasCountFor(status)) {
                 return status;
             }
         }
@@ -151,28 +128,29 @@ class BatchRepository {
         return DownloadStatus.UNKNOWN_ERROR;
     }
 
+    private boolean onlyCompleteAndSubmittedIn(StatusesCount statusesCount) {
+        boolean hasCompleteItems = statusesCount.hasCountFor(DownloadStatus.SUCCESS);
+        boolean hasSubmittedItems = statusesCount.hasCountFor(DownloadStatus.SUBMITTED);
+        boolean hasNotOtherItems = statusesCount.hasNoItemsWithStatuses(STATUSES_EXCEPT_SUCCESS_SUBMITTED);
+
+        return hasCompleteItems && hasSubmittedItems && hasNotOtherItems;
+    }
+
     boolean isBatchStartingForTheFirstTime(long batchId) {
-        Cursor cursor = null;
-        int hasStarted = 0;
+        int hasStarted = DownloadContract.Batches.BATCH_HAS_NOT_STARTED;
+
+        String[] projection = {DownloadContract.Batches.COLUMN_HAS_STARTED};
+        String[] selectionArgs = {String.valueOf(batchId)};
+        String selection = DownloadContract.Batches._ID + " = ?";
+
+        Cursor cursor = queryBatches(projection, selection, selectionArgs);
+
         try {
-            String[] projection = {DownloadContract.Batches.COLUMN_HAS_STARTED};
-            String[] selectionArgs = {String.valueOf(batchId)};
-
-            cursor = resolver.query(
-                    downloadsUriProvider.getBatchesUri(),
-                    projection,
-                    DownloadContract.Batches._ID + " = ?",
-                    selectionArgs,
-                    null
-            );
-
             if (cursor.moveToFirst()) {
-                hasStarted = cursor.getInt(0);
+                hasStarted = Db.getInt(cursor, DownloadContract.Batches.COLUMN_HAS_STARTED);
             }
         } finally {
-            if (cursor != null) {
-                cursor.close();
-            }
+            safeCloseCursor(cursor);
         }
 
         return hasStarted != DownloadContract.Batches.BATCH_HAS_STARTED;
@@ -192,64 +170,57 @@ class BatchRepository {
     }
 
     public List<DownloadBatch> retrieveBatchesFor(Collection<FileDownloadInfo> downloads) {
-        Cursor batchesCursor = resolver.query(this.downloadsUriProvider.getBatchesUri(), null, null, null, null);
-        List<DownloadBatch> batches = new ArrayList<>(batchesCursor.getCount());
+        Cursor cursor = queryBatches(null, null, null);
         try {
-            int idColumn = batchesCursor.getColumnIndexOrThrow(DownloadContract.Batches._ID);
-            int titleIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.Batches.COLUMN_TITLE);
-            int descriptionIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.Batches.COLUMN_DESCRIPTION);
-            int bigPictureUrlIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.Batches.COLUMN_BIG_PICTURE);
-            int statusIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.Batches.COLUMN_STATUS);
-            int visibilityIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.Batches.COLUMN_VISIBILITY);
-            int extraDataIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.Batches.COLUMN_EXTRA_DATA);
-            int totalBatchSizeIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.BatchesWithSizes.COLUMN_TOTAL_BYTES);
-            int currentBatchSizeIndex = batchesCursor.getColumnIndexOrThrow(DownloadContract.BatchesWithSizes.COLUMN_CURRENT_BYTES);
-
-            while (batchesCursor.moveToNext()) {
-                long id = batchesCursor.getLong(idColumn);
-                String title = batchesCursor.getString(titleIndex);
-                String description = batchesCursor.getString(descriptionIndex);
-                String bigPictureUrl = batchesCursor.getString(bigPictureUrlIndex);
-                int status = batchesCursor.getInt(statusIndex);
-                @NotificationVisibility.Value int visibility = batchesCursor.getInt(visibilityIndex);
-                String extraData = batchesCursor.getString(extraDataIndex);
-                long totalSizeBytes = batchesCursor.getLong(totalBatchSizeIndex);
-                long currentSizeBytes = batchesCursor.getLong(currentBatchSizeIndex);
-                BatchInfo batchInfo = new BatchInfo(title, description, bigPictureUrl, visibility, extraData);
-
-                List<FileDownloadInfo> batchDownloads = new ArrayList<>(1);
-                for (FileDownloadInfo fileDownloadInfo : downloads) {
-                    if (fileDownloadInfo.getBatchId() == id) {
-                        batchDownloads.add(fileDownloadInfo);
-                    }
-                }
-                batches.add(new DownloadBatch(id, batchInfo, batchDownloads, status, totalSizeBytes, currentSizeBytes));
-            }
+            return downloadBatchesFrom(downloads, cursor);
         } finally {
-            batchesCursor.close();
+            safeCloseCursor(cursor);
         }
+    }
 
+    private List<DownloadBatch> downloadBatchesFrom(Collection<FileDownloadInfo> downloads, Cursor batchesCursor) {
+        List<DownloadBatch> batches = new ArrayList<>(batchesCursor.getCount());
+        while (batchesCursor.moveToNext()) {
+            batches.add(downloadBatchFrom(downloads, batchesCursor));
+        }
         return batches;
     }
 
-    public void deleteMarkedBatchesFor(Collection<FileDownloadInfo> downloads) {
-        Cursor batchesCursor = resolver.query(
-                downloadsUriProvider.getBatchesUri(),
-                PROJECT_BATCH_ID,
-                WHERE_DELETED_VALUE_IS,
-                MARKED_FOR_DELETION,
-                null);
-        List<Long> batchIdsToDelete = new ArrayList<>();
-        try {
-            while (batchesCursor.moveToNext()) {
-                long id = batchesCursor.getLong(0);
-                batchIdsToDelete.add(id);
+    private DownloadBatch downloadBatchFrom(Collection<FileDownloadInfo> downloads, Cursor cursor) {
+        long id = Db.getLong(cursor, DownloadContract.Batches._ID);
+        String title = Db.getString(cursor, DownloadContract.Batches.COLUMN_TITLE);
+        String description = Db.getString(cursor, DownloadContract.Batches.COLUMN_DESCRIPTION);
+        String bigPictureUrl = Db.getString(cursor, DownloadContract.Batches.COLUMN_BIG_PICTURE);
+        int status = Db.getInt(cursor, DownloadContract.Batches.COLUMN_STATUS);
+        @NotificationVisibility.Value int visibility = Db.getInt(cursor, DownloadContract.Batches.COLUMN_VISIBILITY);
+        String extraData = Db.getString(cursor, DownloadContract.Batches.COLUMN_EXTRA_DATA);
+        long totalSizeBytes = Db.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_TOTAL_BYTES);
+        long currentSizeBytes = Db.getLong(cursor, DownloadContract.BatchesWithSizes.COLUMN_CURRENT_BYTES);
+        BatchInfo batchInfo = new BatchInfo(title, description, bigPictureUrl, visibility, extraData);
+
+        List<FileDownloadInfo> batchDownloads = new ArrayList<>(1);
+        for (FileDownloadInfo fileDownloadInfo : downloads) {
+            if (fileDownloadInfo.getBatchId() == id) {
+                batchDownloads.add(fileDownloadInfo);
             }
-        } finally {
-            batchesCursor.close();
         }
 
-        deleteBatchesForIds(batchIdsToDelete, downloads);
+        return new DownloadBatch(id, batchInfo, batchDownloads, status, totalSizeBytes, currentSizeBytes);
+    }
+
+    public void deleteMarkedBatchesFor(Collection<FileDownloadInfo> downloads) {
+        deleteBatchesForIds(batchIdsToDelete(), downloads);
+    }
+
+    private List<Long> batchIdsToDelete() {
+        Cursor batchesCursor = queryBatches(PROJECT_BATCH_ID, WHERE_DELETED_VALUE_IS, MARKED_FOR_DELETION);
+        List<Long> batchIdsToDelete = new ArrayList<>();
+        while (batchesCursor.moveToNext()) {
+            long id = batchesCursor.getLong(0);
+            batchIdsToDelete.add(id);
+        }
+        batchesCursor.close();
+        return batchIdsToDelete;
     }
 
     private void deleteBatchesForIds(List<Long> batchIdsToDelete, Collection<FileDownloadInfo> downloads) {
@@ -275,8 +246,8 @@ class BatchRepository {
 
     public void setBatchItemsCancelled(long batchId) {
         ContentValues values = new ContentValues(1);
-        values.put(COLUMN_STATUS, DownloadStatus.CANCELED);
-        resolver.update(downloadsUriProvider.getAllDownloadsUri(), values, COLUMN_BATCH_ID + " = ?", new String[]{String.valueOf(batchId)});
+        values.put(DownloadContract.Downloads.COLUMN_STATUS, DownloadStatus.CANCELED);
+        resolver.update(downloadsUriProvider.getAllDownloadsUri(), values, DownloadContract.Downloads.COLUMN_BATCH_ID + " = ?", new String[]{String.valueOf(batchId)});
     }
 
     public void cancelBatch(long batchId) {
@@ -300,16 +271,16 @@ class BatchRepository {
 
     public void setBatchItemsFailed(long batchId, long downloadId) {
         ContentValues values = new ContentValues(1);
-        values.put(COLUMN_STATUS, DownloadStatus.BATCH_FAILED);
+        values.put(DownloadContract.Downloads.COLUMN_STATUS, DownloadStatus.BATCH_FAILED);
         resolver.update(
                 downloadsUriProvider.getAllDownloadsUri(),
                 values,
-                COLUMN_BATCH_ID + " = ? AND " + DownloadContract.Downloads._ID + " <> ? ",
+                DownloadContract.Downloads.COLUMN_BATCH_ID + " = ? AND " + DownloadContract.Downloads._ID + " <> ? ",
                 new String[]{String.valueOf(batchId), String.valueOf(downloadId)}
         );
     }
 
-    public void markBatchHasStarted(long batchId) {
+    public void markBatchAsStarted(long batchId) {
         ContentValues values = new ContentValues(1);
         values.put(DownloadContract.Batches.COLUMN_HAS_STARTED, DownloadContract.Batches.BATCH_HAS_STARTED);
         resolver.update(
@@ -341,27 +312,73 @@ class BatchRepository {
         return resolver.update(downloadsUriProvider.getBatchesUri(), values, where, selectionArgs);
     }
 
-    private static class StatusCountMap {
+    private void safeCloseCursor(Cursor cursor) {
+        if (cursor != null) {
+            cursor.close();
+        }
+    }
+
+    private Cursor queryBatches(String[] projection, String selection, String[] selectionArgs) {
+        return resolver.query(
+                downloadsUriProvider.getBatchesUri(),
+                projection,
+                selection,
+                selectionArgs,
+                null
+        );
+    }
+
+    private Cursor queryDownloads(String[] projection, String[] selectionArgs, String selection) {
+        return resolver.query(
+                downloadsUriProvider.getAllDownloadsUri(),
+                projection,
+                selection,
+                selectionArgs,
+                null
+        );
+    }
+
+    private static class Db {
+        private Db() {
+
+        }
+
+        public static int getInt(Cursor c, String column) {
+            return c.getInt(columnIndexFor(c, column));
+        }
+
+        public static long getLong(Cursor c, String column) {
+            return c.getLong(columnIndexFor(c, column));
+        }
+
+        public static String getString(Cursor c, String column) {
+            return c.getString(columnIndexFor(c, column));
+        }
+
+        private static int columnIndexFor(Cursor c, String column) {
+            return c.getColumnIndexOrThrow(column);
+        }
+    }
+
+    private static class StatusesCount {
 
         private final SparseArrayCompat<Integer> statusCounts = new SparseArrayCompat<>(PRIORITISED_STATUSES_SIZE);
 
         public boolean hasNoItemsWithStatuses(List<Integer> excludedStatuses) {
-            boolean hasOtherItems = false;
             for (int status : excludedStatuses) {
-                boolean hasItemsForStatus = hasCountFor(status);
-                if (hasItemsForStatus) {
-                    hasOtherItems = true;
-                    break;
+                if (hasCountFor(status)) {
+                    return false;
                 }
             }
-            return hasOtherItems;
+
+            return true;
         }
 
-        public boolean hasCountFor(int status) {
-            return statusCounts.get(status, 0) > 0;
+        public boolean hasCountFor(int statusCode) {
+            return statusCounts.get(statusCode, 0) > 0;
         }
 
-        public void increment(int statusCode) {
+        public void incrementCountFor(int statusCode) {
             int currentStatusCount = statusCounts.get(statusCode, 0);
             statusCounts.put(statusCode, currentStatusCount + 1);
         }
