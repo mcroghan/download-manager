@@ -1,8 +1,6 @@
 package com.novoda.downloadmanager.lib;
 
 import android.content.ContentResolver;
-import android.content.ContentUris;
-import android.content.ContentValues;
 import android.database.Cursor;
 import android.support.annotation.NonNull;
 
@@ -25,12 +23,14 @@ class BatchRepository {
     private final DownloadDeleter downloadDeleter;
     private final DownloadsUriProvider downloadsUriProvider;
     private final BatchStatusService batchStatusService;
+    private final BatchStartingService batchStartingService;
 
     BatchRepository(ContentResolver resolver, DownloadDeleter downloadDeleter, DownloadsUriProvider downloadsUriProvider, SystemFacade systemFacade) {
         this.resolver = resolver;
         this.downloadDeleter = downloadDeleter;
         this.downloadsUriProvider = downloadsUriProvider;
         this.batchStatusService = new BatchStatusService(resolver, downloadsUriProvider, systemFacade);
+        batchStartingService = new BatchStartingService(resolver, downloadsUriProvider);
     }
 
     void updateBatchStatus(long batchId, int status) {
@@ -65,23 +65,11 @@ class BatchRepository {
     }
 
     boolean isBatchStartingForTheFirstTime(long batchId) {
-        int hasStarted = DownloadContract.Batches.BATCH_HAS_NOT_STARTED;
+        return batchStartingService.isBatchStartingForTheFirstTime(batchId);
+    }
 
-        String[] projection = {DownloadContract.Batches.COLUMN_HAS_STARTED};
-        String[] selectionArgs = {String.valueOf(batchId)};
-        String selection = DownloadContract.Batches._ID + " = ?";
-
-        Cursor cursor = queryBatches(projection, selection, selectionArgs);
-
-        try {
-            if (cursor.moveToFirst()) {
-                hasStarted = Cursors.getInt(cursor, DownloadContract.Batches.COLUMN_HAS_STARTED);
-            }
-        } finally {
-            safeCloseCursor(cursor);
-        }
-
-        return hasStarted != DownloadContract.Batches.BATCH_HAS_STARTED;
+    public void markBatchAsStarted(long batchId) {
+        batchStartingService.markMatchAsStarted(batchId);
     }
 
     public DownloadBatch retrieveBatchFor(FileDownloadInfo download) {
@@ -170,17 +158,6 @@ class BatchRepository {
 
     public Cursor retrieveFor(BatchQuery query) {
         return resolver.query(downloadsUriProvider.getBatchesUri(), null, query.getSelection(), query.getSelectionArguments(), query.getSortOrder());
-    }
-
-    public void markBatchAsStarted(long batchId) {
-        ContentValues values = new ContentValues(1);
-        values.put(DownloadContract.Batches.COLUMN_HAS_STARTED, DownloadContract.Batches.BATCH_HAS_STARTED);
-        resolver.update(
-                ContentUris.withAppendedId(downloadsUriProvider.getBatchesUri(), batchId),
-                values,
-                null,
-                null
-        );
     }
 
     private void safeCloseCursor(Cursor cursor) {
