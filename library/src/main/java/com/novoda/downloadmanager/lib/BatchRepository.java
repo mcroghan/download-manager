@@ -4,33 +4,21 @@ import android.content.ContentResolver;
 import android.database.Cursor;
 import android.support.annotation.NonNull;
 
-import com.novoda.notils.string.QueryUtils;
-import com.novoda.notils.string.StringUtils;
-
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
 class BatchRepository {
 
-    private static final String[] PROJECT_BATCH_ID = {DownloadContract.Batches._ID};
-    private static final String WHERE_DELETED_VALUE_IS = DownloadContract.Batches.COLUMN_DELETED + " = ?";
-    private static final String[] MARKED_FOR_DELETION = {"1"};
-
-    private final ContentResolver resolver;
-    private final DownloadDeleter downloadDeleter;
-    private final DownloadsUriProvider downloadsUriProvider;
     private final BatchStatusService batchStatusService;
     private final BatchStartingService batchStartingService;
     private final BatchRetrievalService batchRetrievalService;
+    private final BatchDeletionService batchDeletionService;
 
     BatchRepository(ContentResolver resolver, DownloadDeleter downloadDeleter, DownloadsUriProvider downloadsUriProvider, SystemFacade systemFacade) {
-        this.resolver = resolver;
-        this.downloadDeleter = downloadDeleter;
-        this.downloadsUriProvider = downloadsUriProvider;
         this.batchStatusService = new BatchStatusService(resolver, downloadsUriProvider, systemFacade);
         this.batchStartingService = new BatchStartingService(resolver, downloadsUriProvider);
         this.batchRetrievalService = new BatchRetrievalService(resolver, downloadsUriProvider);
+        this.batchDeletionService = new BatchDeletionService(downloadDeleter, resolver, downloadsUriProvider);
     }
 
     void updateBatchStatus(long batchId, int status) {
@@ -84,40 +72,8 @@ class BatchRepository {
         return batchRetrievalService.retrieveFor(query);
     }
 
-    private Cursor queryBatches(String[] projection, String selection, String[] selectionArgs) {
-        return batchRetrievalService.queryBatches(projection, selection, selectionArgs);
-    }
-
     public void deleteMarkedBatchesFor(Collection<FileDownloadInfo> downloads) {
-        deleteBatchesForIds(batchIdsToDelete(), downloads);
-    }
-
-    private void deleteBatchesForIds(List<Long> batchIdsToDelete, Collection<FileDownloadInfo> downloads) {
-        if (batchIdsToDelete.isEmpty()) {
-            return;
-        }
-
-        for (FileDownloadInfo download : downloads) {
-            if (batchIdsToDelete.contains(download.getBatchId())) {
-                downloadDeleter.deleteFileAndDatabaseRow(download);
-            }
-        }
-
-        String selectionPlaceholders = QueryUtils.createSelectionPlaceholdersOfSize(batchIdsToDelete.size());
-        String where = DownloadContract.Batches._ID + " IN (" + selectionPlaceholders + ")";
-        String[] selectionArgs = StringUtils.toStringArray(batchIdsToDelete.toArray());
-        resolver.delete(downloadsUriProvider.getBatchesUri(), where, selectionArgs);
-    }
-
-    private List<Long> batchIdsToDelete() {
-        Cursor batchesCursor = queryBatches(PROJECT_BATCH_ID, WHERE_DELETED_VALUE_IS, MARKED_FOR_DELETION);
-        List<Long> batchIdsToDelete = new ArrayList<>();
-        while (batchesCursor.moveToNext()) {
-            long id = batchesCursor.getLong(0);
-            batchIdsToDelete.add(id);
-        }
-        batchesCursor.close();
-        return batchIdsToDelete;
+        batchDeletionService.deleteMarkedBatchesFor(downloads);
     }
 
 }
